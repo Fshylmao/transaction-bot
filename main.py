@@ -5,6 +5,9 @@ import os
 import datetime
 from aiohttp import web
 import asyncio
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env file if present
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -28,7 +31,14 @@ def save():
 def get_next_id():
     return (transaction_list[-1]["id"] + 1) if transaction_list else 1
 
+# Admin permission check decorator
+def is_admin():
+    async def predicate(ctx):
+        return ctx.author.guild_permissions.administrator
+    return commands.check(predicate)
+
 @bot.command()
+@is_admin()
 async def log(ctx, user_input, *, details):
     try:
         if user_input.startswith("<@") and user_input.endswith(">"):
@@ -69,6 +79,7 @@ async def log(ctx, user_input, *, details):
     await ctx.send(f"✅ Logged #{transaction['id']}: **{user}** | **{skin.strip()}** | **${amount}** via **{payment}**")
 
 @bot.command()
+@is_admin()
 async def unlog(ctx, log_id: int):
     global transaction_list
     found = next((t for t in transaction_list if t["id"] == log_id), None)
@@ -82,6 +93,7 @@ async def unlog(ctx, log_id: int):
     await ctx.send(f"🗑️ Deleted transaction #{log_id}")
 
 @bot.command()
+@is_admin()
 async def transactions(ctx, user: discord.Member):
     user_logs = [t for t in transaction_list if t["user_id"] == user.id]
 
@@ -96,8 +108,15 @@ async def transactions(ctx, user: discord.Member):
     msg = f"📒 Last {len(lines)} transactions for {user.mention}:\n" + "\n".join(lines)
     await ctx.send(msg)
 
-# --- Webserver for uptime monitoring ---
+# Error handler for permission errors
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("❌ You do not have permission to use this command.")
+    else:
+        raise error  # Raise other errors so you can see them in logs
 
+# --- Webserver for uptime monitoring ---
 async def handle(request):
     return web.Response(text="Bot is alive!")
 
@@ -108,11 +127,13 @@ runner = web.AppRunner(app)
 
 async def start_webserver():
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
 async def main():
     await start_webserver()
-    await bot.start(os.environ.get("TOKEN") or "YOUR_BOT_TOKEN_HERE")
+    TOKEN = os.getenv("TOKEN") or "YOUR_BOT_TOKEN_HERE"
+    await bot.start(TOKEN)
 
 asyncio.run(main())
