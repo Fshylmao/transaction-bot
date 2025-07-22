@@ -5,9 +5,10 @@ import os
 import datetime
 from aiohttp import web
 import asyncio
-from dotenv import load_dotenv
 
-load_dotenv()  # Load .env file if present
+# If using locally and .env file, uncomment next 2 lines:
+# from dotenv import load_dotenv
+# load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -80,17 +81,27 @@ async def log(ctx, user_input, *, details):
 
 @bot.command()
 @is_admin()
-async def unlog(ctx, log_id: int):
+async def unlog(ctx, user_input, log_id: int):
     global transaction_list
-    found = next((t for t in transaction_list if t["id"] == log_id), None)
 
-    if not found:
-        await ctx.send(f"❌ No transaction found with ID {log_id}")
+    try:
+        if user_input.startswith("<@") and user_input.endswith(">"):
+            user_id = int(user_input.strip("<@!>"))
+        else:
+            user_id = int(user_input)
+    except:
+        await ctx.send("❌ Invalid user.")
         return
 
-    transaction_list = [t for t in transaction_list if t["id"] != log_id]
+    found = next((t for t in transaction_list if t["id"] == log_id and t["user_id"] == user_id), None)
+
+    if not found:
+        await ctx.send(f"❌ No transaction found with ID {log_id} for that user.")
+        return
+
+    transaction_list = [t for t in transaction_list if not (t["id"] == log_id and t["user_id"] == user_id)]
     save()
-    await ctx.send(f"🗑️ Deleted transaction #{log_id}")
+    await ctx.send(f"🗑️ Deleted transaction #{log_id} for <@{user_id}>")
 
 @bot.command()
 @is_admin()
@@ -114,7 +125,7 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
         await ctx.send("❌ You do not have permission to use this command.")
     else:
-        raise error  # Raise other errors so you can see them in logs
+        raise error  # Show other errors in logs
 
 # --- Webserver for uptime monitoring ---
 async def handle(request):
