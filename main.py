@@ -2,71 +2,83 @@ import discord
 from discord.ext import commands
 from discord.ext.commands import has_permissions, CheckFailure
 from pymongo import MongoClient
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-client = commands.Bot(command_prefix="+", intents=discord.Intents.all())
-mongo = MongoClient(MONGO_URI)
-db = mongo["logDB"]
-collection = db["logs"]
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix='+', intents=intents)
+
+# MongoDB setup
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["transaction_db"]
+collection = db["transactions"]
 
 def is_admin():
     async def predicate(ctx):
         return ctx.author.guild_permissions.administrator
     return commands.check(predicate)
 
-@client.event
+@bot.event
 async def on_ready():
-    print(f"Bot connected as {client.user}")
+    print(f'Logged in as {bot.user} ({bot.user.id})')
 
-@client.command()
+@bot.command()
 @is_admin()
-async def log(ctx, member: discord.Member, *, details):
-    log_entry = {
-        "user_id": member.id,
-        "user_name": str(member),
-        "details": details,
-        "moderator": str(ctx.author),
-        "mod_id": ctx.author.id
+async def log(ctx, user: discord.Member, amount: float, *, reason: str = "No reason provided"):
+    entry = {
+        "user_id": user.id,
+        "user_name": str(user),
+        "amount": amount,
+        "reason": reason
     }
-    collection.insert_one(log_entry)
-    await ctx.send(f"✅ Logged `{member}` for: **{details}**")
+    collection.insert_one(entry)
+    await ctx.send(f"✅ Logged {amount} for {user.mention} | Reason: {reason}")
 
-@client.command(name="logs")
+@bot.command(name="logs")
 @is_admin()
-async def logs(ctx, member: discord.Member):
-    user_logs = collection.find({"user_id": member.id})
-    logs = [f"• {log['details']} (by {log['moderator']})" for log in user_logs]
-    if not logs:
-        await ctx.send(f"❌ No logs found for {member.mention}")
-        return
-    msg = f"📄 Logs for {member.mention}:\n" + "\n".join(logs)
-    await ctx.send(msg)
+async def logs(ctx, user: discord.Member):
+    logs = collection.find({"user_id": user.id})
+    result = ""
+    for i, log in enumerate(logs, 1):
+        result += f"{i}. Amount: {log['amount']} | Reason: {log['reason']}\n"
+    if result == "":
+        result = "No transactions found."
+    await ctx.send(f"📒 Logs for {user.mention}:\n{result}")
 
-@client.command()
+@bot.command()
 @is_admin()
-async def unlog(ctx, member: discord.Member, *, details):
-    result = collection.delete_one({
-        "user_id": member.id,
-        "details": details
-    })
-    if result.deleted_count > 0:
-        await ctx.send(f"✅ Removed log from `{member}`: **{details}**")
+async def unlog(ctx, user: discord.Member, amount: float):
+    result = collection.find_one_and_delete({"user_id": user.id, "amount": amount})
+    if result:
+        await ctx.send(f"🗑️ Removed log of {amount} for {user.mention}")
     else:
-        await ctx.send(f"❌ No matching log found for `{member}` with those details.")
+        await ctx.send("❌ Log not found.")
 
-@client.command()
+@bot.command()
 @is_admin()
 async def role(ctx, member: discord.Member, role: discord.Role):
     if role in member.roles:
         await member.remove_roles(role)
-        await ctx.send(f"❌ Removed role `{role.name}` from {member.mention}")
+        await ctx.send(f"🔻 Removed role {role.name} from {member.mention}")
     else:
         await member.add_roles(role)
-        await ctx.send(f"✅ Gave role `{role.name}` to {member.mention}")
+        await ctx.send(f"🔺 Added role {role.name} to {member.mention}")
 
-client.run(TOKEN)
+@log.error
+@logs.error
+@unlog.error
+@role.error
+async def admin_command_error(ctx, error):
+    if isinstance(error, CheckFailure):
+        await ctx.send("❌ You don’t have permission to use this command.")
+    else:
+        await ctx.send("⚠️ Error occurred.")
+
+bot.run(TOKEN)
