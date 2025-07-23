@@ -3,15 +3,10 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
-import asyncio
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-
-# Debug
-print("DEBUG: TOKEN loaded:", "Yes" if TOKEN else "No")
-print("DEBUG: MONGO_URI loaded:", MONGO_URI)
 
 # MongoDB setup
 mongo_client = MongoClient(MONGO_URI)
@@ -45,17 +40,37 @@ async def on_command_error(ctx, error):
 
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, item: str, amount: float, payment_type: str):
-    entry = {
-        "user_id": user.id,
-        "user_name": user.name,
-        "item": item,
-        "amount": amount,
-        "payment_type": payment_type,
-        "logger_id": ctx.author.id
-    }
-    logs_collection.insert_one(entry)
-    await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
+async def log(ctx, user: discord.Member, *args):
+    try:
+        # Find first float in args = amount
+        for i, arg in enumerate(args):
+            try:
+                amount = float(arg)
+                item = ' '.join(args[:i])  # all before amount
+                payment_type = ' '.join(args[i+1:])  # all after amount
+                break
+            except ValueError:
+                continue
+        else:
+            await ctx.send("❌ You must include an amount (a number).")
+            return
+
+        if not item or not payment_type:
+            await ctx.send("❌ Invalid format. Use: `+log @user item amount payment_type`")
+            return
+
+        entry = {
+            "user_id": user.id,
+            "user_name": user.name,
+            "item": item,
+            "amount": amount,
+            "payment_type": payment_type,
+            "logger_id": ctx.author.id
+        }
+        logs_collection.insert_one(entry)
+        await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
+    except Exception as e:
+        await ctx.send(f"⚠️ Error occurred: {e}")
 
 @bot.command(name="logs")
 @is_admin()
