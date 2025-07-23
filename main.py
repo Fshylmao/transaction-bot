@@ -8,14 +8,9 @@ import traceback
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-# Load .env file variables (only works locally; Railway uses dashboard env vars)
 load_dotenv()
-
 TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-
-print(f"DEBUG: TOKEN loaded: {'Yes' if TOKEN else 'No'}")
-print(f"DEBUG: MONGO_URI loaded: {MONGO_URI}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -23,7 +18,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="+", intents=intents)
 
-# Initialize MongoDB client with your MONGO_URI
+# Setup MongoDB client
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["transaction_db"]
 collection = db["transactions"]
@@ -35,10 +30,7 @@ def is_admin():
         return ctx.author.guild_permissions.administrator
     return commands.check(predicate)
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} ({bot.user.id})")
-
+# Mongo blocking operations run in executor
 def insert_log(entry):
     collection.insert_one(entry)
 
@@ -48,39 +40,81 @@ def find_logs(user_id):
 def delete_log(user_id, amount):
     return collection.find_one_and_delete({"user_id": user_id, "amount": amount})
 
+async def run_blocking(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, func, *args)
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} ({bot.user.id})")
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, CheckFailure):
+        await ctx.send("❌ You don’t have permission to use this command.")
+    else:
+        # Send error and print traceback for debugging
+        await ctx.send(f"⚠️ Error occurred:\n```{error}```")
+        traceback.print_exception(type(error), error, error.__traceback__)
+
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, amount: float, *, reason: str = "No reason provided"):
+async def log(ctx, user: discord.Member, *, rest: str):
+    parts = rest.split()
+    amount = None
+    amount_index = None
+
+    for i, part in enumerate(parts):
+        try:
+            amount = float(part)
+            amount_index = i
+            break
+        except ValueError:
+            continue
+
+    if amount is None:
+        await ctx.send("❌ Please provide a valid numeric amount.")
+        return
+
+    item_name = " ".join(parts[:amount_index]).strip()
+    payment_type = " ".join(parts[amount_index + 1 :]).strip() or "No payment type provided"
+
     entry = {
         "user_id": user.id,
         "user_name": str(user),
         "amount": amount,
-        "reason": reason
+        "item": item_name,
+        "payment_type": payment_type,
+        "logger_id": ctx.author.id,
     }
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(executor, insert_log, entry)
-    await ctx.send(f"✅ Logged {amount} for {user.mention} | Reason: {reason}")
+
+    await run_blocking(insert_log, entry)
+    await ctx.send(f"✅ Logged {amount} for {user.mention} | Item: {item_name} | Payment type: {payment_type}")
 
 @bot.command(name="logs")
 @is_admin()
-async def logs(ctx, user: discord.Member):
-    loop = asyncio.get_running_loop()
-    logs = await loop.run_in_executor(executor, find_logs, user.id)
-    
+async def logs_command(ctx, user: discord.Member):
+    logs = await run_blocking(find_logs, user.id)
+
     if not logs:
-        await ctx.send("No transactions found.")
+        await ctx.send(f"📭 No logs found for {user.mention}")
         return
 
-    result = ""
-    for i, log in enumerate(logs, 1):
-        result += f"{i}. Amount: {log['amount']} | Reason: {log['reason']}\n"
-    await ctx.send(f"📒 Logs for {user.mention}:\n{result}")
+    msg = f"📋 Logs for {user.mention}:\n"
+    for i, entry in enumerate(logs, 1):
+        item = entry.get("item", "No item")
+        amount = entry.get("amount", "N/A")
+        payment_type = entry.get("payment_type", "N/A")
+        logger = entry.get("logger_id", None)
+        logger_mention = f"<@{logger}>" if logger else "Unknown"
+        msg += f"{i}. Amount: {amount} | Item: {item} | Payment: {payment_type} | Logged by: {logger_mention}\n"
+
+    await ctx.send(msg)
 
 @bot.command()
 @is_admin()
 async def unlog(ctx, user: discord.Member, amount: float):
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(executor, delete_log, user.id, amount)
+    result = await run_blocking(delete_log, user.id, amount)
     if result:
         await ctx.send(f"🗑️ Removed log of {amount} for {user.mention}")
     else:
@@ -96,15 +130,15 @@ async def role(ctx, member: discord.Member, role: discord.Role):
         await member.add_roles(role)
         await ctx.send(f"🔺 Added role {role.name} to {member.mention}")
 
-@log.error
-@logs.error
-@unlog.error
-@role.error
-async def admin_command_error(ctx, error):
-    if isinstance(error, CheckFailure):
-        await ctx.send("❌ You don’t have permission to use this command.")
-    else:
-        await ctx.send(f"⚠️ Error occurred:\n```{error}```")
-        traceback.print_exception(type(error), error, error.__traceback__)
+@bot.command()
+@is_admin()
+async def testmongo(ctx):
+    try:
+        # Try a simple command to test connection
+        await run_blocking(db.list_collection_names)
+        await ctx.send("✅ MongoDB connection successful!")
+    except Exception as e:
+        await ctx.send(f"❌ MongoDB connection failed:\n```{e}```")
+        traceback.print_exception(type(e), e, e.__traceback__)
 
 bot.run(TOKEN)
