@@ -3,10 +3,15 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
+import asyncio
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+
+# Debug
+print("DEBUG: TOKEN loaded:", "Yes" if TOKEN else "No")
+print("DEBUG: MONGO_URI loaded:", MONGO_URI if MONGO_URI else "No")
 
 # MongoDB setup
 mongo_client = MongoClient(MONGO_URI)
@@ -89,15 +94,23 @@ async def testmongo(ctx):
     except Exception as e:
         await ctx.send(f"❌ MongoDB connection failed: {e}")
 
-# Fixed role command to accept role name strings
 @bot.command()
 @is_admin()
-async def role(ctx, member: discord.Member, *, role_name: str):
-    role = discord.utils.get(ctx.guild.roles, name=role_name)
-    if role is None:
-        await ctx.send(f"❌ Role '{role_name}' not found.")
+async def role(ctx, member: discord.Member, *, partial_role_name: str):
+    partial_role_name = partial_role_name.lower()
+    
+    # Find roles with partial match, case-insensitive
+    matching_roles = [role for role in ctx.guild.roles if partial_role_name in role.name.lower()]
+    
+    if not matching_roles:
+        await ctx.send(f"❌ No role found matching '{partial_role_name}'.")
         return
-
+    elif len(matching_roles) > 1:
+        role_names = ", ".join([role.name for role in matching_roles])
+        await ctx.send(f"❌ Multiple roles match '{partial_role_name}': {role_names}. Please be more specific.")
+        return
+    
+    role = matching_roles[0]
     if role in member.roles:
         await member.remove_roles(role)
         await ctx.send(f"Removed {role.mention} from {member.mention}")
