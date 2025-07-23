@@ -40,37 +40,17 @@ async def on_command_error(ctx, error):
 
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, *args):
-    try:
-        # Find first float in args = amount
-        for i, arg in enumerate(args):
-            try:
-                amount = float(arg)
-                item = ' '.join(args[:i])  # all before amount
-                payment_type = ' '.join(args[i+1:])  # all after amount
-                break
-            except ValueError:
-                continue
-        else:
-            await ctx.send("❌ You must include an amount (a number).")
-            return
-
-        if not item or not payment_type:
-            await ctx.send("❌ Invalid format. Use: `+log @user item amount payment_type`")
-            return
-
-        entry = {
-            "user_id": user.id,
-            "user_name": user.name,
-            "item": item,
-            "amount": amount,
-            "payment_type": payment_type,
-            "logger_id": ctx.author.id
-        }
-        logs_collection.insert_one(entry)
-        await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
-    except Exception as e:
-        await ctx.send(f"⚠️ Error occurred: {e}")
+async def log(ctx, user: discord.Member, item: str, amount: float, payment_type: str):
+    entry = {
+        "user_id": user.id,
+        "user_name": user.name,
+        "item": item,
+        "amount": amount,
+        "payment_type": payment_type,
+        "logger_id": ctx.author.id
+    }
+    logs_collection.insert_one(entry)
+    await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
 
 @bot.command(name="logs")
 @is_admin()
@@ -108,5 +88,21 @@ async def testmongo(ctx):
         await ctx.send("✅ MongoDB connection successful.")
     except Exception as e:
         await ctx.send(f"❌ MongoDB connection failed: {e}")
+
+# Fixed role command to accept role name strings
+@bot.command()
+@is_admin()
+async def role(ctx, member: discord.Member, *, role_name: str):
+    role = discord.utils.get(ctx.guild.roles, name=role_name)
+    if role is None:
+        await ctx.send(f"❌ Role '{role_name}' not found.")
+        return
+
+    if role in member.roles:
+        await member.remove_roles(role)
+        await ctx.send(f"Removed {role.mention} from {member.mention}")
+    else:
+        await member.add_roles(role)
+        await ctx.send(f"Added {role.mention} to {member.mention}")
 
 bot.run(TOKEN)
