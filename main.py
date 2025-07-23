@@ -101,8 +101,9 @@ async def admin_command_error(ctx, error):
     if isinstance(error, CheckFailure):
         await ctx.send("❌ You don’t have permission to use this command.")
     else:
-        await ctx.send("⚠️ Error occurred.")
-        # Print traceback to Railway logs for debugging
+        # Send error message to Discord (remove if you want to keep errors private)
+        await ctx.send(f"⚠️ Error occurred:\n```{error}```")
+        # Print full traceback in logs (Railway console)
         traceback.print_exception(type(error), error, error.__traceback__)
 
 bot.run(TOKEN)
