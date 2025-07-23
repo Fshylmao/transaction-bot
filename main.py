@@ -1,9 +1,12 @@
 import discord
 from discord.ext import commands
-from discord.ext.commands import has_permissions, CheckFailure
+from discord.ext.commands import CheckFailure
 from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
+import asyncio
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -20,6 +23,9 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["transaction_db"]
 collection = db["transactions"]
 
+# ThreadPoolExecutor for offloading blocking calls
+executor = ThreadPoolExecutor()
+
 def is_admin():
     async def predicate(ctx):
         return ctx.author.guild_permissions.administrator
@@ -28,6 +34,16 @@ def is_admin():
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user} ({bot.user.id})')
+
+# Blocking pymongo calls wrapped here:
+def insert_log(entry):
+    collection.insert_one(entry)
+
+def find_logs(user_id):
+    return list(collection.find({"user_id": user_id}))
+
+def delete_log(user_id, amount):
+    return collection.find_one_and_delete({"user_id": user_id, "amount": amount})
 
 @bot.command()
 @is_admin()
@@ -38,24 +54,30 @@ async def log(ctx, user: discord.Member, amount: float, *, reason: str = "No rea
         "amount": amount,
         "reason": reason
     }
-    collection.insert_one(entry)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, insert_log, entry)
     await ctx.send(f"✅ Logged {amount} for {user.mention} | Reason: {reason}")
 
 @bot.command(name="logs")
 @is_admin()
 async def logs(ctx, user: discord.Member):
-    logs = collection.find({"user_id": user.id})
+    loop = asyncio.get_running_loop()
+    logs = await loop.run_in_executor(executor, find_logs, user.id)
+    
+    if not logs:
+        await ctx.send("No transactions found.")
+        return
+
     result = ""
     for i, log in enumerate(logs, 1):
         result += f"{i}. Amount: {log['amount']} | Reason: {log['reason']}\n"
-    if result == "":
-        result = "No transactions found."
     await ctx.send(f"📒 Logs for {user.mention}:\n{result}")
 
 @bot.command()
 @is_admin()
 async def unlog(ctx, user: discord.Member, amount: float):
-    result = collection.find_one_and_delete({"user_id": user.id, "amount": amount})
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, delete_log, user.id, amount)
     if result:
         await ctx.send(f"🗑️ Removed log of {amount} for {user.mention}")
     else:
@@ -80,5 +102,7 @@ async def admin_command_error(ctx, error):
         await ctx.send("❌ You don’t have permission to use this command.")
     else:
         await ctx.send("⚠️ Error occurred.")
+        # Print traceback to Railway logs for debugging
+        traceback.print_exception(type(error), error, error.__traceback__)
 
 bot.run(TOKEN)
