@@ -1,12 +1,11 @@
 import discord
 from discord.ext import commands
-from discord.ext.commands import CheckFailure
-from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
-import traceback
+from pymongo import MongoClient
+from bson.objectid import ObjectId
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -15,86 +14,61 @@ MONGO_URI = os.getenv("MONGO_URI")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
+intents.guilds = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
-# Setup MongoDB client
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["transaction_db"]
-collection = db["transactions"]
+print("DEBUG: TOKEN loaded:", "Yes" if TOKEN else "No")
+print("DEBUG: MONGO_URI loaded:", MONGO_URI if MONGO_URI else "None")
 
-executor = ThreadPoolExecutor()
+# MongoDB setup
+client = MongoClient(MONGO_URI)
+db = client["transaction_db"]
+collection = db["logs"]
+
+# Utility for running blocking code
+executor = concurrent.futures.ThreadPoolExecutor()
+
+async def run_blocking(func, *args):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, func, *args)
 
 def is_admin():
     async def predicate(ctx):
         return ctx.author.guild_permissions.administrator
     return commands.check(predicate)
 
-# Mongo blocking operations run in executor
-def insert_log(entry):
-    collection.insert_one(entry)
-
-def find_logs(user_id):
-    return list(collection.find({"user_id": user_id}))
-
-def delete_log(user_id, amount):
-    return collection.find_one_and_delete({"user_id": user_id, "amount": amount})
-
-async def run_blocking(func, *args):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, func, *args)
-
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} ({bot.user.id})")
+    print(f"Logged in as {bot.user.name} ({bot.user.id})")
 
 @bot.event
 async def on_command_error(ctx, error):
-    if isinstance(error, CheckFailure):
-        await ctx.send("❌ You don’t have permission to use this command.")
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("❌ You do not have permission to use this command.")
     else:
-        # Send error and print traceback for debugging
-        await ctx.send(f"⚠️ Error occurred:\n```{error}```")
-        traceback.print_exception(type(error), error, error.__traceback__)
+        raise error
 
+# --- LOG COMMAND ---
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, *, rest: str):
-    parts = rest.split()
-    amount = None
-    amount_index = None
-
-    for i, part in enumerate(parts):
-        try:
-            amount = float(part)
-            amount_index = i
-            break
-        except ValueError:
-            continue
-
-    if amount is None:
-        await ctx.send("❌ Please provide a valid numeric amount.")
-        return
-
-    item_name = " ".join(parts[:amount_index]).strip()
-    payment_type = " ".join(parts[amount_index + 1 :]).strip() or "No payment type provided"
-
+async def log(ctx, user: discord.Member, item: str, amount: float, payment: str):
     entry = {
-        "user_id": user.id,
-        "user_name": str(user),
+        "user_id": str(user.id),
+        "item": item,
         "amount": amount,
-        "item": item_name,
-        "payment_type": payment_type,
-        "logger_id": ctx.author.id,
+        "payment": payment,
+        "logger_id": str(ctx.author.id)
     }
 
-    await run_blocking(insert_log, entry)
-    await ctx.send(f"✅ Logged {amount} for {user.mention} | Item: {item_name} | Payment type: {payment_type}")
+    await run_blocking(collection.insert_one, entry)
+    await ctx.send(f"✅ Logged **{item} {amount} ({payment})** for {user.mention}")
 
+# --- LOGS COMMAND ---
 @bot.command(name="logs")
 @is_admin()
 async def logs_command(ctx, user: discord.Member):
-    logs = await run_blocking(find_logs, user.id)
+    user_id = str(user.id)
+    logs = await run_blocking(lambda: list(collection.find({"user_id": user_id})))
 
     if not logs:
         await ctx.send(f"📭 No logs found for {user.mention}")
@@ -102,43 +76,50 @@ async def logs_command(ctx, user: discord.Member):
 
     msg = f"📋 Logs for {user.mention}:\n"
     for i, entry in enumerate(logs, 1):
-        item = entry.get("item", "No item")
-        amount = entry.get("amount", "N/A")
-        payment_type = entry.get("payment_type", "N/A")
-        logger = entry.get("logger_id", None)
-        logger_mention = f"<@{logger}>" if logger else "Unknown"
-        msg += f"{i}. Amount: {amount} | Item: {item} | Payment: {payment_type} | Logged by: {logger_mention}\n"
-
+        logger = f"<@{entry['logger_id']}>"
+        msg += f"{i}. {entry['item']} - {entry['amount']} ({entry['payment']}) by {logger}\n"
     await ctx.send(msg)
 
+# --- UNLOG COMMAND ---
 @bot.command()
 @is_admin()
-async def unlog(ctx, user: discord.Member, amount: float):
-    result = await run_blocking(delete_log, user.id, amount)
-    if result:
-        await ctx.send(f"🗑️ Removed log of {amount} for {user.mention}")
-    else:
-        await ctx.send("❌ Log not found.")
+async def unlog(ctx, user: discord.Member, index: int):
+    logs = await run_blocking(lambda: list(collection.find({"user_id": str(user.id)})))
 
+    if not logs or index < 1 or index > len(logs):
+        await ctx.send("❌ Invalid log number.")
+        return
+
+    log_to_delete = logs[index - 1]
+    result = await run_blocking(collection.delete_one, {"_id": log_to_delete["_id"]})
+
+    if result.deleted_count:
+        await ctx.send(f"🗑️ Deleted log #{index} for {user.mention}")
+    else:
+        await ctx.send("❌ Failed to delete the log.")
+
+# --- ROLE TOGGLE ---
 @bot.command()
 @is_admin()
 async def role(ctx, member: discord.Member, role: discord.Role):
     if role in member.roles:
         await member.remove_roles(role)
-        await ctx.send(f"🔻 Removed role {role.name} from {member.mention}")
+        await ctx.send(f"❌ Removed {role.mention} from {member.mention}")
     else:
         await member.add_roles(role)
-        await ctx.send(f"🔺 Added role {role.name} to {member.mention}")
+        await ctx.send(f"✅ Added {role.mention} to {member.mention}")
 
+# --- TEST MONGO ---
 @bot.command()
 @is_admin()
 async def testmongo(ctx):
     try:
-        # Try a simple command to test connection
-        await run_blocking(db.list_collection_names)
-        await ctx.send("✅ MongoDB connection successful!")
+        stats = await run_blocking(db.command, "ping")
+        if stats.get("ok") == 1:
+            await ctx.send("✅ MongoDB connection is working!")
+        else:
+            await ctx.send("❌ MongoDB responded but with error.")
     except Exception as e:
-        await ctx.send(f"❌ MongoDB connection failed:\n```{e}```")
-        traceback.print_exception(type(e), e, e.__traceback__)
+        await ctx.send(f"❌ MongoDB error: {e}")
 
 bot.run(TOKEN)
