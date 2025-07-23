@@ -3,7 +3,6 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
-import asyncio
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -11,7 +10,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # Debug
 print("DEBUG: TOKEN loaded:", "Yes" if TOKEN else "No")
-print("DEBUG: MONGO_URI loaded:", MONGO_URI if MONGO_URI else "No")
+print("DEBUG: MONGO_URI loaded:", MONGO_URI)
 
 # MongoDB setup
 mongo_client = MongoClient(MONGO_URI)
@@ -40,22 +39,35 @@ async def on_ready():
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
         await ctx.send("❌ You do not have permission to use this command.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Command argument error.")
     else:
         raise error
 
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, item: str, amount: float, payment_type: str):
-    entry = {
-        "user_id": user.id,
-        "user_name": user.name,
-        "item": item,
-        "amount": amount,
-        "payment_type": payment_type,
-        "logger_id": ctx.author.id
-    }
-    logs_collection.insert_one(entry)
-    await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
+async def log(ctx, user: discord.Member, *, rest: str):
+    try:
+        parts = rest.rsplit(" ", 2)
+        if len(parts) != 3:
+            await ctx.send("❌ Format: `+log @user item_name amount payment_type`")
+            return
+
+        item, amount_str, payment_type = parts
+        amount = float(amount_str)
+
+        entry = {
+            "user_id": user.id,
+            "user_name": user.name,
+            "item": item,
+            "amount": amount,
+            "payment_type": payment_type,
+            "logger_id": ctx.author.id
+        }
+        logs_collection.insert_one(entry)
+        await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
+    except ValueError:
+        await ctx.send("❌ Invalid amount. Please use a number.")
 
 @bot.command(name="logs")
 @is_admin()
@@ -96,26 +108,21 @@ async def testmongo(ctx):
 
 @bot.command()
 @is_admin()
-async def role(ctx, member: discord.Member, *, partial_role_name: str):
-    partial_role_name = partial_role_name.lower()
-    
-    # Find roles with partial match, case-insensitive
-    matching_roles = [role for role in ctx.guild.roles if partial_role_name in role.name.lower()]
-    
-    if not matching_roles:
-        await ctx.send(f"❌ No role found matching '{partial_role_name}'.")
+async def role(ctx, member: discord.Member, *, role_query: str):
+    # Find the closest matching role by name prefix (case-insensitive)
+    matched_role = discord.utils.find(
+        lambda r: r.name.lower().startswith(role_query.lower()),
+        ctx.guild.roles
+    )
+
+    if not matched_role:
+        await ctx.send("❌ Role not found.")
         return
-    elif len(matching_roles) > 1:
-        role_names = ", ".join([role.name for role in matching_roles])
-        await ctx.send(f"❌ Multiple roles match '{partial_role_name}': {role_names}. Please be more specific.")
-        return
-    
-    role = matching_roles[0]
-    if role in member.roles:
-        await member.remove_roles(role)
-        await ctx.send(f"Removed {role.mention} from {member.mention}")
-    else:
-        await member.add_roles(role)
-        await ctx.send(f"Added {role.mention} to {member.mention}")
+
+    try:
+        await member.add_roles(matched_role)
+        await ctx.send(f"✅ Added role `{matched_role.name}` to {member.mention}")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to assign that role.")
 
 bot.run(TOKEN)
