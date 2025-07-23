@@ -3,34 +3,29 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from bson.objectid import ObjectId
 import asyncio
-import concurrent.futures
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
+# Debug
+print("DEBUG: TOKEN loaded:", "Yes" if TOKEN else "No")
+print("DEBUG: MONGO_URI loaded:", MONGO_URI)
+
+# MongoDB setup
+mongo_client = MongoClient(MONGO_URI)
+mongo_db = mongo_client["transaction_db"]
+logs_collection = mongo_db["transactions"]
+
+# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.messages = True
 intents.guilds = True
+
 bot = commands.Bot(command_prefix="+", intents=intents)
-
-print("DEBUG: TOKEN loaded:", "Yes" if TOKEN else "No")
-print("DEBUG: MONGO_URI loaded:", MONGO_URI if MONGO_URI else "None")
-
-# MongoDB setup
-client = MongoClient(MONGO_URI)
-db = client["transaction_db"]
-collection = db["logs"]
-
-# Utility for running blocking code
-executor = concurrent.futures.ThreadPoolExecutor()
-
-async def run_blocking(func, *args):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, func, *args)
 
 def is_admin():
     async def predicate(ctx):
@@ -39,7 +34,7 @@ def is_admin():
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    print(f"Logged in as {bot.user} ({bot.user.id})")
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -48,78 +43,55 @@ async def on_command_error(ctx, error):
     else:
         raise error
 
-# --- LOG COMMAND ---
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, item: str, amount: float, payment: str):
+async def log(ctx, user: discord.Member, item: str, amount: float, payment_type: str):
     entry = {
-        "user_id": str(user.id),
+        "user_id": user.id,
+        "user_name": user.name,
         "item": item,
         "amount": amount,
-        "payment": payment,
-        "logger_id": str(ctx.author.id)
+        "payment_type": payment_type,
+        "logger_id": ctx.author.id
     }
+    logs_collection.insert_one(entry)
+    await ctx.send(f"✅ Logged `{item}` worth **{amount}** via `{payment_type}` for {user.mention}")
 
-    await run_blocking(collection.insert_one, entry)
-    await ctx.send(f"✅ Logged **{item} {amount} ({payment})** for {user.mention}")
-
-# --- LOGS COMMAND ---
 @bot.command(name="logs")
 @is_admin()
 async def logs_command(ctx, user: discord.Member):
-    user_id = str(user.id)
-    logs = await run_blocking(lambda: list(collection.find({"user_id": user_id})))
-
-    if not logs:
+    user_logs = list(logs_collection.find({"user_id": user.id}))
+    if not user_logs:
         await ctx.send(f"📭 No logs found for {user.mention}")
         return
 
     msg = f"📋 Logs for {user.mention}:\n"
-    for i, entry in enumerate(logs, 1):
-        logger = f"<@{entry['logger_id']}>"
-        msg += f"{i}. {entry['item']} - {entry['amount']} ({entry['payment']}) by {logger}\n"
+    for i, entry in enumerate(user_logs, 1):
+        msg += (
+            f"{i}. `{entry['item']}` - ${entry['amount']} ({entry['payment_type']}) "
+            f"(by <@{entry['logger_id']}>)\n"
+        )
     await ctx.send(msg)
 
-# --- UNLOG COMMAND ---
 @bot.command()
 @is_admin()
 async def unlog(ctx, user: discord.Member, index: int):
-    logs = await run_blocking(lambda: list(collection.find({"user_id": str(user.id)})))
-
-    if not logs or index < 1 or index > len(logs):
-        await ctx.send("❌ Invalid log number.")
+    user_logs = list(logs_collection.find({"user_id": user.id}))
+    if not user_logs or index < 1 or index > len(user_logs):
+        await ctx.send("❌ Invalid log index.")
         return
 
-    log_to_delete = logs[index - 1]
-    result = await run_blocking(collection.delete_one, {"_id": log_to_delete["_id"]})
+    to_delete = user_logs[index - 1]
+    logs_collection.delete_one({"_id": to_delete["_id"]})
+    await ctx.send(f"🗑️ Removed log #{index} for {user.mention}")
 
-    if result.deleted_count:
-        await ctx.send(f"🗑️ Deleted log #{index} for {user.mention}")
-    else:
-        await ctx.send("❌ Failed to delete the log.")
-
-# --- ROLE TOGGLE ---
-@bot.command()
-@is_admin()
-async def role(ctx, member: discord.Member, role: discord.Role):
-    if role in member.roles:
-        await member.remove_roles(role)
-        await ctx.send(f"❌ Removed {role.mention} from {member.mention}")
-    else:
-        await member.add_roles(role)
-        await ctx.send(f"✅ Added {role.mention} to {member.mention}")
-
-# --- TEST MONGO ---
 @bot.command()
 @is_admin()
 async def testmongo(ctx):
     try:
-        stats = await run_blocking(db.command, "ping")
-        if stats.get("ok") == 1:
-            await ctx.send("✅ MongoDB connection is working!")
-        else:
-            await ctx.send("❌ MongoDB responded but with error.")
+        mongo_client.admin.command("ping")
+        await ctx.send("✅ MongoDB connection successful.")
     except Exception as e:
-        await ctx.send(f"❌ MongoDB error: {e}")
+        await ctx.send(f"❌ MongoDB connection failed: {e}")
 
 bot.run(TOKEN)
