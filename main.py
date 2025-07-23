@@ -4,21 +4,26 @@ from discord.ext.commands import CheckFailure
 from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
-import asyncio
 import traceback
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+# Load .env file variables (only works locally; Railway uses dashboard env vars)
 load_dotenv()
+
 TOKEN = os.getenv("TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+
+print(f"DEBUG: TOKEN loaded: {'Yes' if TOKEN else 'No'}")
+print(f"DEBUG: MONGO_URI loaded: {MONGO_URI}")
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='+', intents=intents)
+bot = commands.Bot(command_prefix="+", intents=intents)
 
-# MongoDB client setup
+# Initialize MongoDB client with your MONGO_URI
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["transaction_db"]
 collection = db["transactions"]
@@ -30,6 +35,10 @@ def is_admin():
         return ctx.author.guild_permissions.administrator
     return commands.check(predicate)
 
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} ({bot.user.id})")
+
 def insert_log(entry):
     collection.insert_one(entry)
 
@@ -38,10 +47,6 @@ def find_logs(user_id):
 
 def delete_log(user_id, amount):
     return collection.find_one_and_delete({"user_id": user_id, "amount": amount})
-
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user} ({bot.user.id})')
 
 @bot.command()
 @is_admin()
@@ -61,9 +66,9 @@ async def log(ctx, user: discord.Member, amount: float, *, reason: str = "No rea
 async def logs(ctx, user: discord.Member):
     loop = asyncio.get_running_loop()
     logs = await loop.run_in_executor(executor, find_logs, user.id)
-
+    
     if not logs:
-        await ctx.send(f"📭 No transactions found for {user.mention}")
+        await ctx.send("No transactions found.")
         return
 
     result = ""
