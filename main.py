@@ -1,104 +1,105 @@
 import discord
 from discord.ext import commands
+from discord.ext.commands import CheckFailure
+from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
-import json
-import aiofiles  # async file read/write
 import asyncio
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
 
 intents = discord.Intents.default()
-intents.messages = True
-intents.guilds = True
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="+", intents=intents)
+bot = commands.Bot(command_prefix='+', intents=intents)
 
-LOG_FILE = "transaction_logs.json"
-logs = {}
+# MongoDB client setup
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["transaction_db"]
+collection = db["transactions"]
 
-async def load_logs():
-    global logs
-    if os.path.exists(LOG_FILE):
-        try:
-            async with aiofiles.open(LOG_FILE, "r") as f:
-                content = await f.read()
-                logs = json.loads(content) if content else {}
-        except json.JSONDecodeError:
-            logs = {}
-    else:
-        logs = {}
-
-async def save_logs():
-    async with aiofiles.open(LOG_FILE, "w") as f:
-        await f.write(json.dumps(logs, indent=4))
+executor = ThreadPoolExecutor()
 
 def is_admin():
     async def predicate(ctx):
         return ctx.author.guild_permissions.administrator
     return commands.check(predicate)
 
-@bot.event
-async def on_ready():
-    await load_logs()
-    print(f"Logged in as {bot.user.name}")
+def insert_log(entry):
+    collection.insert_one(entry)
+
+def find_logs(user_id):
+    return list(collection.find({"user_id": user_id}))
+
+def delete_log(user_id, amount):
+    return collection.find_one_and_delete({"user_id": user_id, "amount": amount})
 
 @bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CheckFailure):
-        await ctx.send("❌ You do not have permission to use this command.")
-    else:
-        raise error
+async def on_ready():
+    print(f'Logged in as {bot.user} ({bot.user.id})')
 
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.Member, *, amount: str):
-    user_id = str(user.id)
-    if user_id not in logs:
-        logs[user_id] = []
-    logs[user_id].append({"amount": amount, "logger": str(ctx.author.id)})
-    await save_logs()
-    await ctx.send(f"✅ Logged **{amount}** for {user.mention}")
+async def log(ctx, user: discord.Member, amount: float, *, reason: str = "No reason provided"):
+    entry = {
+        "user_id": user.id,
+        "user_name": str(user),
+        "amount": amount,
+        "reason": reason
+    }
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, insert_log, entry)
+    await ctx.send(f"✅ Logged {amount} for {user.mention} | Reason: {reason}")
 
 @bot.command(name="logs")
 @is_admin()
-async def logs_command(ctx, user: discord.Member):
-    user_id = str(user.id)
-    if user_id not in logs or not logs[user_id]:
-        await ctx.send(f"📭 No logs found for {user.mention}")
+async def logs(ctx, user: discord.Member):
+    loop = asyncio.get_running_loop()
+    logs = await loop.run_in_executor(executor, find_logs, user.id)
+
+    if not logs:
+        await ctx.send(f"📭 No transactions found for {user.mention}")
         return
 
-    msg = f"📋 Logs for {user.mention}:\n"
-    for i, entry in enumerate(logs[user_id], 1):
-        msg += f"{i}. {entry['amount']} (by <@{entry['logger']}>)\n"
-    await ctx.send(msg)
+    result = ""
+    for i, log in enumerate(logs, 1):
+        result += f"{i}. Amount: {log['amount']} | Reason: {log['reason']}\n"
+    await ctx.send(f"📒 Logs for {user.mention}:\n{result}")
 
 @bot.command()
 @is_admin()
-async def unlog(ctx, user: discord.Member, *, amount: str):
-    user_id = str(user.id)
-    if user_id in logs:
-        original_length = len(logs[user_id])
-        logs[user_id] = [entry for entry in logs[user_id] if entry["amount"] != amount]
-        if len(logs[user_id]) < original_length:
-            await save_logs()
-            await ctx.send(f"🗑️ Removed **{amount}** from {user.mention}'s logs.")
-        else:
-            await ctx.send("❌ No matching entry found.")
+async def unlog(ctx, user: discord.Member, amount: float):
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(executor, delete_log, user.id, amount)
+    if result:
+        await ctx.send(f"🗑️ Removed log of {amount} for {user.mention}")
     else:
-        await ctx.send("❌ No logs for that user.")
+        await ctx.send("❌ Log not found.")
 
 @bot.command()
 @is_admin()
 async def role(ctx, member: discord.Member, role: discord.Role):
     if role in member.roles:
         await member.remove_roles(role)
-        await ctx.send(f"Removed {role.mention} from {member.mention}")
+        await ctx.send(f"🔻 Removed role {role.name} from {member.mention}")
     else:
         await member.add_roles(role)
-        await ctx.send(f"Added {role.mention} to {member.mention}")
+        await ctx.send(f"🔺 Added role {role.name} to {member.mention}")
+
+@log.error
+@logs.error
+@unlog.error
+@role.error
+async def admin_command_error(ctx, error):
+    if isinstance(error, CheckFailure):
+        await ctx.send("❌ You don’t have permission to use this command.")
+    else:
+        await ctx.send(f"⚠️ Error occurred:\n```{error}```")
+        traceback.print_exception(type(error), error, error.__traceback__)
 
 bot.run(TOKEN)
