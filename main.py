@@ -3,6 +3,8 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 import json
+import aiofiles  # async file read/write
+import asyncio
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -16,17 +18,23 @@ intents.members = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 LOG_FILE = "transaction_logs.json"
+logs = {}
 
-# Load logs from file or start empty
-if os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "r") as f:
-        logs = json.load(f)
-else:
-    logs = {}
+async def load_logs():
+    global logs
+    if os.path.exists(LOG_FILE):
+        try:
+            async with aiofiles.open(LOG_FILE, "r") as f:
+                content = await f.read()
+                logs = json.loads(content) if content else {}
+        except json.JSONDecodeError:
+            logs = {}
+    else:
+        logs = {}
 
-def save_logs():
-    with open(LOG_FILE, "w") as f:
-        json.dump(logs, f, indent=4)
+async def save_logs():
+    async with aiofiles.open(LOG_FILE, "w") as f:
+        await f.write(json.dumps(logs, indent=4))
 
 def is_admin():
     async def predicate(ctx):
@@ -35,6 +43,7 @@ def is_admin():
 
 @bot.event
 async def on_ready():
+    await load_logs()
     print(f"Logged in as {bot.user.name}")
 
 @bot.event
@@ -46,17 +55,17 @@ async def on_command_error(ctx, error):
 
 @bot.command()
 @is_admin()
-async def log(ctx, user: discord.User, *, amount: str):
+async def log(ctx, user: discord.Member, *, amount: str):
     user_id = str(user.id)
     if user_id not in logs:
         logs[user_id] = []
     logs[user_id].append({"amount": amount, "logger": str(ctx.author.id)})
-    save_logs()
+    await save_logs()
     await ctx.send(f"✅ Logged **{amount}** for {user.mention}")
 
 @bot.command(name="logs")
 @is_admin()
-async def logs_command(ctx, user: discord.User):
+async def logs_command(ctx, user: discord.Member):
     user_id = str(user.id)
     if user_id not in logs or not logs[user_id]:
         await ctx.send(f"📭 No logs found for {user.mention}")
@@ -69,15 +78,13 @@ async def logs_command(ctx, user: discord.User):
 
 @bot.command()
 @is_admin()
-async def unlog(ctx, user: discord.User, *, amount: str):
+async def unlog(ctx, user: discord.Member, *, amount: str):
     user_id = str(user.id)
     if user_id in logs:
         original_length = len(logs[user_id])
-        logs[user_id] = [
-            entry for entry in logs[user_id] if entry["amount"] != amount
-        ]
+        logs[user_id] = [entry for entry in logs[user_id] if entry["amount"] != amount]
         if len(logs[user_id]) < original_length:
-            save_logs()
+            await save_logs()
             await ctx.send(f"🗑️ Removed **{amount}** from {user.mention}'s logs.")
         else:
             await ctx.send("❌ No matching entry found.")
